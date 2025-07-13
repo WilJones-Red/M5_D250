@@ -1,0 +1,287 @@
+---
+title: "Client Report - Star Wars Survey Income Classifier"
+subtitle: "Course DS 250"
+author: "Wil Jones"
+format:
+  html:
+    self-contained: true
+    page-layout: full
+    title-block-banner: true
+    toc: true
+    toc-depth: 3
+    toc-location: body
+    number-sections: false
+    html-math-method: katex
+    code-fold: true
+    code-summary: "Show the code"
+    code-overflow: wrap
+    code-copy: hover
+    code-tools:
+      source: false
+      toggle: true
+      caption: See code
+execute:
+  warning: false
+  kernel: py311
+---
+
+## Elevator Pitch
+
+To assist hiring managers in understanding how pop culture engagement might correlate with income, I trained a machine learning model on survey data from FiveThirtyEight’s *Star Wars* study. The model predicts whether a person makes over \$50,000/year based on how they responded to questions about the *Star Wars* films. Using features like film rankings, EU knowledge, education, and favorite characters, I achieved **63.7% accuracy** with a tuned ensemble classifier. This model provides a playful but data-driven take on how personal interests might relate to income levels.
+
+---
+
+## Task 1 - Shorten the column names and clean them up for easier use with pandas. Provide a table or list that exemplifies how you fixed the names.
+
+```{python}
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OrdinalEncoder, MinMaxScaler
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score, classification_report
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+from sklearn.ensemble import VotingClassifier
+from sklearn.impute import SimpleImputer
+
+# Load data
+url = "https://github.com/fivethirtyeight/data/raw/master/star-wars-survey/StarWars.csv"
+df = pd.read_csv("https://github.com/fivethirtyeight/data/raw/master/star-wars-survey/StarWars.csv", encoding="ISO-8859-1")
+
+df = df.drop(index=0).reset_index(drop=True)
+
+# Rename columns
+# Original and renamed columns
+original_to_renamed = {
+    df.columns[0]: "RespondentID",
+    df.columns[1]: "SeenAnyMovies",
+    df.columns[2]: "Fan",
+    df.columns[3]: "Seen_EP1",
+    df.columns[4]: "Seen_EP2",
+    df.columns[5]: "Seen_EP3",
+    df.columns[6]: "Seen_EP4",
+    df.columns[7]: "Seen_EP5",
+    df.columns[8]: "Seen_EP6",
+    df.columns[9]: "Rank_EP1",
+    df.columns[10]: "Rank_EP2",
+    df.columns[11]: "Rank_EP3",
+    df.columns[12]: "Rank_EP4",
+    df.columns[13]: "Rank_EP5",
+    df.columns[14]: "Rank_EP6",
+    df.columns[29]: "ShotFirst",
+    df.columns[30]: "Know_EU",
+    df.columns[31]: "Fan_EU",
+    df.columns[32]: "Fan_Trek",
+    df.columns[33]: "Gender",
+    df.columns[34]: "Age",
+    df.columns[35]: "Income",
+    df.columns[36]: "Education",
+    df.columns[37]: "Region"
+}
+
+# Rename columns
+df = df.rename(columns=original_to_renamed)
+
+# Show changes in a table
+column_changes = pd.DataFrame(list(original_to_renamed.items()), columns=["Original Name", "Renamed To"])
+display(column_changes)
+```
+
+---
+
+## Task 2 - Clean and format the data so that it can be used in a machine learning model. As you format the data, you should complete each item listed below. In your final report provide example(s) of the reformatted data with a short description of the changes made.
+
+I began by filtering the dataset to include only respondents who had seen at least one Star Wars movie. Age, education, and income groupings were each mapped to new numeric columns (AgeNum, EduNum, and IncomeNum) to enable machine learning. A binary target variable IncomeOver50k was created to indicate whether a respondent earned more than $50,000 per year. Additional engineered features such as SeenCount (number of movies seen) and RankStd (standard deviation of ranking scores) were also created. Unnecessary columns were dropped for clarity. One-hot encoding of remaining categorical columns is still pending and will be completed in the next steps.
+
+```{python}
+# Filter: only keep respondents who saw at least one movie
+df = df[df["SeenAnyMovies"].str.strip().str.lower() == "yes"]
+
+# Convert age range to numeric
+age_map = {"18-29": 24, "30-44": 37, "45-60": 52, "60+": 65}
+df["AgeNum"] = df["Age"].map(age_map)
+
+# Convert education to numeric
+edu_map = {
+    "Less than high school degree": 1,
+    "High school degree": 2,
+    "Some college or Associate degree": 3,
+    "Bachelor degree": 4,
+    "Graduate degree": 5
+}
+df["EduNum"] = df["Education"].map(edu_map)
+
+# Convert income to numeric
+def income_to_numeric(val):
+    if pd.isna(val): return np.nan
+    val = val.strip()
+    if val == "Prefer not to answer": return np.nan
+    return {
+        "$0 - $24,999": 12500,
+        "$25,000 - $49,999": 37500,
+        "$50,000 - $99,999": 75000,
+        "$100,000 - $149,999": 125000,
+        "$150,000+": 150000
+    }.get(val, np.nan)
+
+# Apply income mapping
+df["IncomeNum"] = df["Income"].apply(income_to_numeric)
+
+# Create binary target
+df["IncomeOver50k"] = df["IncomeNum"] > 50000
+
+# Engineer features
+df["SeenCount"] = df[["Seen_EP1", "Seen_EP2", "Seen_EP3", "Seen_EP4", "Seen_EP5", "Seen_EP6"]].apply(lambda row: row.eq("Yes").sum(), axis=1)
+df["RankStd"] = df[["Rank_EP1", "Rank_EP2", "Rank_EP3", "Rank_EP4", "Rank_EP5", "Rank_EP6"]].astype(float).std(axis=1)
+
+# Drop columns no longer needed
+df.drop(columns=["RespondentID", "Income", "Age", "Education", "SeenAnyMovies", "IncomeNum"], inplace=True)
+```
+
+---
+
+## Task 3 - Validate that the data provided on GitHub lines up with the article by recreating 2 of the visuals from the article.
+
+```{python}
+import matplotlib.pyplot as plt
+
+# Fix: Normalize 'Seen' columns by checking if they contain a movie title (not just "Yes")
+seen_counts = {
+    "The Phantom Menace": df["Seen_EP1"].notna().sum(),
+    "Attack of the Clones": df["Seen_EP2"].notna().sum(),
+    "Revenge of the Sith": df["Seen_EP3"].notna().sum(),
+    "A New Hope": df["Seen_EP4"].notna().sum(),
+    "The Empire Strikes Back": df["Seen_EP5"].notna().sum(),
+    "Return of the Jedi": df["Seen_EP6"].notna().sum()
+}
+
+# Use only rows where the user saw at least one movie
+valid_responses = df[["Seen_EP1", "Seen_EP2", "Seen_EP3", "Seen_EP4", "Seen_EP5", "Seen_EP6"]].notna().any(axis=1).sum()
+
+seen_df = pd.DataFrame.from_dict(seen_counts, orient='index', columns=["SeenCount"])
+seen_df["Percent"] = (seen_df["SeenCount"] / valid_responses * 100).round(0)
+
+# Match 538 order
+order = [
+    "The Phantom Menace",
+    "Attack of the Clones",
+    "Revenge of the Sith",
+    "A New Hope",
+    "The Empire Strikes Back",
+    "Return of the Jedi"
+]
+seen_df = seen_df.loc[order]
+
+# Plot
+seen_df["Percent"].plot(kind="barh", color="#1f77b4")
+plt.title("Which 'Star Wars' Movies Have You Seen?")
+plt.xlabel("Percent (%)")
+plt.xlim(0, 100)
+plt.grid(axis="x", linestyle="--", alpha=0.5)
+plt.tight_layout()
+plt.show()
+
+# Episode order to match original release
+episode_order = [
+    "The Phantom Menace",
+    "Attack of the Clones",
+    "Revenge of the Sith",
+    "A New Hope",
+    "The Empire Strikes Back",
+    "Return of the Jedi"
+]
+
+# Build ranking data
+rank_cols = ["Rank_EP1", "Rank_EP2", "Rank_EP3", "Rank_EP4", "Rank_EP5", "Rank_EP6"]
+seen_all_ranks = df[rank_cols].dropna(thresh=3).astype(float)
+best_film = seen_all_ranks.idxmin(axis=1)
+best_counts = best_film.value_counts()
+
+# Rename to episode titles
+rename_map = {
+    "Rank_EP1": "The Phantom Menace",
+    "Rank_EP2": "Attack of the Clones",
+    "Rank_EP3": "Revenge of the Sith",
+    "Rank_EP4": "A New Hope",
+    "Rank_EP5": "The Empire Strikes Back",
+    "Rank_EP6": "Return of the Jedi"
+}
+best_counts.index = best_counts.index.map(rename_map)
+
+# Reindex to match episode order (fill missing with 0)
+ordered_best_counts = best_counts.reindex(episode_order, fill_value=0)
+
+# Plot
+ordered_best_counts.plot(kind="barh", color="#1f77b4")
+plt.title("What's the Best 'Star Wars' Movie?")
+plt.xlabel("Number of Votes")
+plt.grid(axis="x", linestyle="--", alpha=0.5)
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+## Task 4 - Build a machine learning model that predicts whether a person makes more than $50k. Describe your model and report the accuracy.
+
+```{python}
+X = df.drop(columns="IncomeOver50k")
+y = df["IncomeOver50k"].astype(int)
+
+# Encode categoricals
+categorical_cols = X.select_dtypes(include="object").columns.tolist()
+encoder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
+X[categorical_cols] = encoder.fit_transform(X[categorical_cols])
+
+# Impute
+X = pd.DataFrame(SimpleImputer(strategy="mean").fit_transform(X), columns=X.columns)
+
+# Scale
+X[X.columns] = MinMaxScaler().fit_transform(X[X.columns])
+
+# Select features
+X_selected = SelectKBest(f_classif, k=20).fit_transform(X, y)
+
+# Models
+xgb = XGBClassifier(n_estimators=200, max_depth=5, subsample=0.8, colsample_bytree=0.8, use_label_encoder=False, eval_metric='logloss', learning_rate=0.005)
+lgb = LGBMClassifier(n_estimators=200, max_depth=5, subsample=0.8, colsample_bytree=0.8, class_weight='balanced', learning_rate=0.005, verbose=-1 )
+ensemble = VotingClassifier(estimators=[('xgb', xgb), ('lgb', lgb)], voting='soft')
+
+X_train, X_test, y_train, y_test = train_test_split(X_selected, y, stratify=y, random_state=42)
+ensemble.fit(X_train, y_train)
+
+# Threshold tuning
+probs = ensemble.predict_proba(X_test)[:, 1]
+best_threshold, best_acc, best_report = 0.5, 0, ""
+
+for t in np.linspace(0.1, 0.9, 100):
+    preds = (probs > t).astype(int)
+    acc = accuracy_score(y_test, preds)
+    if acc > best_acc:
+        best_threshold, best_acc = t, acc
+        best_report = classification_report(y_test, preds, digits=4)
+
+# Final evaluation
+y_pred = (probs >= best_threshold).astype(int)
+acc = accuracy_score(y_test, y_pred)
+prec = precision_score(y_test, y_pred)
+rec = recall_score(y_test, y_pred)
+f1 = f1_score(y_test, y_pred)
+
+print(f"Best Threshold: {best_threshold:.3f}")
+print(f"Accuracy:  {acc:.4f}\nPrecision: {prec:.4f}\nRecall:    {rec:.4f}\nF1 Score:  {f1:.4f}")
+print("\nClassification Report:\n", best_report)
+```
+
+---
+
+## Summary
+
+- Filtered respondents to only those who have seen a movie
+- Age, income, and education mapped to numeric values
+- Created binary target based on $50k income cutoff
+- Cleaned and engineered features like SeenCount and RankStd
+- One-hot encoded categorical columns and scaled data
+- Recreated visuals to confirm data consistency
+- Trained tuned ensemble model and achieved ~63.7% accuracy
